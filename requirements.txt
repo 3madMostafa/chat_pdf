@@ -6,6 +6,6 @@ pdf2image
 Pillow
 langdetect
 gTTS
-chromadb
+#chromadb
 youtube-transcript-api
 requests
