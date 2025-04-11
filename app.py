@@ -5,8 +5,8 @@ import requests
 import google.generativeai as genai
 import PyPDF2
 from youtube_transcript_api import YouTubeTranscriptApi
-import chromadb
-from chromadb.utils import embedding_functions
+#import chromadb
+#from chromadb.utils import embedding_functions
 import pytesseract
 from PIL import Image
 from gtts import gTTS
@@ -30,25 +30,25 @@ model = genai.GenerativeModel(model_name="models/gemini-1.5-pro")
 # -------------------------------------------------------------------
 # إعداد ChromaDB لاسترجاع السياق (مجموعة المنهج)
 # -------------------------------------------------------------------
-chromadb_client = chromadb.Client()
-embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-collection_names = [col.name for col in chromadb_client.list_collections()]
-if "curriculum" in collection_names:
-    collection = chromadb_client.get_collection("curriculum")
-else:
-    collection = chromadb_client.create_collection(name="curriculum", embedding_function=embedding_function)
+#chromadb_client = chromadb.Client()
+#embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+#collection_names = [col.name for col in chromadb_client.list_collections()]
+#if "curriculum" in collection_names:
+#    collection = chromadb_client.get_collection("curriculum")
+#else:
+#    collection = chromadb_client.create_collection(name="curriculum", embedding_function=embedding_function)
 
 # -------------------------------------------------------------------
 # دوال مساعدة
 # -------------------------------------------------------------------
 
-def augment_prompt_with_chroma(prompt):
-    results = collection.query(query_texts=[prompt], n_results=3)
-    context = ""
-    if results and results.get("documents") and results["documents"][0]:
-        context = " ".join(results["documents"][0])
-    augmented = prompt + "\n\nRelevant Context:\n" + context
-    return augmented
+#def augment_prompt_with_chroma(prompt):
+#    results = collection.query(query_texts=[prompt], n_results=3)
+#    context = ""
+#    if results and results.get("documents") and results["documents"][0]:
+#        context = " ".join(results["documents"][0])
+#    augmented = prompt + "\n\nRelevant Context:\n" + context
+#    return augmented
 
 def extract_pdf_text(pdf_file):
     """
@@ -129,8 +129,8 @@ def process_uploaded_file(uploaded_file):
     return content
 
 def call_llm(prompt):
-    augmented_prompt = augment_prompt_with_chroma(prompt)
-    response = model.generate_content(augmented_prompt)
+   # augmented_prompt = augment_prompt_with_chroma(prompt)
+    response = model.generate_content(prompt)
     return response.candidates[0].content.parts[0].text
 
 # -------------------------------------------------------------------
@@ -231,10 +231,10 @@ def general_chat_feature(language):
     if st.button("إرسال"):
         if user_query:
             school_keywords = ["مدرسة", "ثانوي", "امتحان", "تعليم", "منهج", "صف"]
-            if any(word in user_query for word in school_keywords):
-                prompt = augment_prompt_with_chroma(user_query)
-            else:
-                prompt = user_query
+           # if any(word in user_query for word in school_keywords):
+           #     prompt = augment_prompt_with_chroma(user_query)
+           # else:
+            prompt = user_query
             answer = call_llm(prompt)
             st.markdown("### الإجابة")
             st.write(answer)
