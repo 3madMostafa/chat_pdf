@@ -11,7 +11,6 @@ import pytesseract
 from PIL import Image
 from gtts import gTTS
 from io import BytesIO
-import graphviz
 
 # مكتبة إضافية لتحويل صفحات PDF إلى صور (تتطلب تثبيت poppler)
 from pdf2image import convert_from_bytes
