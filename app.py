@@ -5,369 +5,827 @@ import requests
 import google.generativeai as genai
 import PyPDF2
 from youtube_transcript_api import YouTubeTranscriptApi
-#import chromadb
-#from chromadb.utils import embedding_functions
 import pytesseract
 from PIL import Image
 from gtts import gTTS
 from io import BytesIO
-
-# مكتبة إضافية لتحويل صفحات PDF إلى صور (تتطلب تثبيت poppler)
 from pdf2image import convert_from_bytes
-
-# إعداد langdetect مع seed لضمان ثبات النتائج
 from langdetect import detect, DetectorFactory
+import time
+from datetime import datetime
+
+# Ensure consistent language detection
 DetectorFactory.seed = 0
 
-# -------------------------------------------------------------------
-# إعداد Gemini API
-# -------------------------------------------------------------------
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") or "AIzaSyDtwKF1t3fcooCHNauZoMk35h5jAHHLKbs"
-genai.configure(api_key=GOOGLE_API_KEY)
-model = genai.GenerativeModel(model_name="models/gemini-1.5-pro")
+# ===================================================================
+# CONFIGURATION & INITIALIZATION
+# ===================================================================
 
-# -------------------------------------------------------------------
-# إعداد ChromaDB لاسترجاع السياق (مجموعة المنهج)
-# -------------------------------------------------------------------
-#chromadb_client = chromadb.Client()
-#embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-#collection_names = [col.name for col in chromadb_client.list_collections()]
-#if "curriculum" in collection_names:
-#    collection = chromadb_client.get_collection("curriculum")
-#else:
-#    collection = chromadb_client.create_collection(name="curriculum", embedding_function=embedding_function)
+class Config:
+    """Application configuration and constants"""
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") or "AIzaSyDtwKF1t3fcooCHNauZoMk35h5jAHHLKbs"
+    MODEL_NAME = "models/gemini-1.5-pro"
+    SUPPORTED_FILE_TYPES = ["pdf", "txt", "jpg", "jpeg", "png"]
+    MAX_PREVIEW_LENGTH = 500
+    DEFAULT_LANGUAGE = "en"
 
-# -------------------------------------------------------------------
-# دوال مساعدة
-# -------------------------------------------------------------------
+# Initialize Gemini AI
+genai.configure(api_key=Config.GOOGLE_API_KEY)
+model = genai.GenerativeModel(model_name=Config.MODEL_NAME)
 
-#def augment_prompt_with_chroma(prompt):
-#    results = collection.query(query_texts=[prompt], n_results=3)
-#    context = ""
-#    if results and results.get("documents") and results["documents"][0]:
-#        context = " ".join(results["documents"][0])
-#    augmented = prompt + "\n\nRelevant Context:\n" + context
-#    return augmented
+# ===================================================================
+# CORE AI PROCESSING FUNCTIONS
+# ===================================================================
 
-def extract_pdf_text(pdf_file):
-    """
-    محاولة استخراج النص باستخدام PyPDF2، وفي حال عدم وجود نص (ملف مسح ضوئي)
-    نقوم بتحويل الصفحات إلى صور ثم استخدام OCR.
-    """
-    text = ""
-    try:
-        pdf_bytes = pdf_file.read()
-        pdf_file.seek(0)
-        reader = PyPDF2.PdfReader(BytesIO(pdf_bytes))
-        for page in reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-        # إذا لم يستخرج النص، نفترض أن الملف عبارة عن صور (مسح ضوئي)
-        if text.strip() == "":
-            images = convert_from_bytes(pdf_bytes)
-            for image in images:
-                page_text = pytesseract.image_to_string(image, lang="ara+eng")
-                text += page_text + "\n"
-        return text
-    except Exception as e:
-        st.error(f"خطأ في معالجة PDF: {e}")
-        return ""
+class AIProcessor:
+    """Advanced AI processing with Gemini integration"""
+    
+    @staticmethod
+    def generate_response(prompt: str, temperature: float = 0.7) -> str:
+        """
+        Generate AI response with enhanced error handling and streaming capability
+        
+        Args:
+            prompt: Input prompt for the AI model
+            temperature: Controls randomness (0.0 to 1.0)
+            
+        Returns:
+            Generated text response
+        """
+        try:
+            generation_config = genai.types.GenerationConfig(
+                temperature=temperature,
+                top_p=0.95,
+                top_k=40,
+                max_output_tokens=8192,
+            )
+            
+            response = model.generate_content(
+                prompt,
+                generation_config=generation_config
+            )
+            
+            return response.candidates[0].content.parts[0].text
+        
+        except Exception as e:
+            st.error(f"AI Processing Error: {str(e)}")
+            return "An error occurred while processing your request. Please try again."
+    
+    @staticmethod
+    def generate_streaming_response(prompt: str):
+        """Generate streaming response for real-time display"""
+        try:
+            response = model.generate_content(prompt, stream=True)
+            for chunk in response:
+                if chunk.text:
+                    yield chunk.text
+        except Exception as e:
+            yield f"Streaming Error: {str(e)}"
 
-def extract_youtube_transcript(video_url):
-    video_id_match = re.search(r"v=([^&]+)", video_url)
-    video_id = video_id_match.group(1) if video_id_match else video_url.split("/")[-1]
-    try:
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['ar'])
-        transcript = " ".join([item["text"] for item in transcript_list])
-        return transcript
-    except Exception as e:
-        return f"❌ لم يتم العثور على تفريغ لهذا الفيديو باللغة العربية. الخطأ: {e}"
+# ===================================================================
+# DOCUMENT PROCESSING UTILITIES
+# ===================================================================
 
-def detect_language(text):
-    try:
-        lang = detect(text)
-        return "ar" if lang.startswith("ar") else "en"
-    except Exception:
-        return "ar"  # بديل افتراضي
-
-def get_tts_audio(text):
-    try:
-        detected_lang = detect_language(text)
-        tts = gTTS(text, lang=detected_lang)
-        audio_bytes = BytesIO()
-        tts.write_to_fp(audio_bytes)
-        audio_bytes.seek(0)
-        return audio_bytes
-    except Exception as e:
-        st.error(f"خطأ في تحويل النص إلى صوت: {e}")
-        return None
-
-def process_uploaded_file(uploaded_file):
-    """
-    يدعم رفع الملفات لأنواع:
-    - PDF: استخراج النص باستخدام PyPDF2، وإذا لم يكن هناك نص (مسح ضوئي)
-      يقوم بتحويل الصفحات إلى صور واستخدام OCR.
-    - TXT: قراءة النص مباشرة.
-    - الصور (JPG, JPEG, PNG): استخدام OCR لقراءة النص من الصورة.
-    """
-    content = ""
-    if uploaded_file is not None:
-        if uploaded_file.type == "application/pdf":
-            content = extract_pdf_text(uploaded_file)
-        elif uploaded_file.type in ["image/jpeg", "image/jpg", "image/png"]:
-            image = Image.open(uploaded_file)
-            content = pytesseract.image_to_string(image, lang="ara+eng")
-        elif uploaded_file.type in ["text/plain"]:
-            content = uploaded_file.read().decode("utf-8")
+class DocumentProcessor:
+    """Advanced document processing with OCR and text extraction"""
+    
+    @staticmethod
+    def extract_pdf_text(pdf_file) -> str:
+        """
+        Extract text from PDF using PyPDF2, fallback to OCR for scanned documents
+        
+        Args:
+            pdf_file: Uploaded PDF file object
+            
+        Returns:
+            Extracted text content
+        """
+        text = ""
+        try:
+            pdf_bytes = pdf_file.read()
+            pdf_file.seek(0)
+            reader = PyPDF2.PdfReader(BytesIO(pdf_bytes))
+            
+            # Extract text from each page
+            for page in reader.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
+            
+            # Fallback to OCR if no text extracted (scanned PDF)
+            if not text.strip():
+                with st.spinner("Processing scanned document with OCR..."):
+                    images = convert_from_bytes(pdf_bytes)
+                    for idx, image in enumerate(images):
+                        page_text = pytesseract.image_to_string(image, lang="ara+eng")
+                        text += f"\n--- Page {idx + 1} ---\n{page_text}\n"
+            
+            return text.strip()
+        
+        except Exception as e:
+            st.error(f"PDF Processing Error: {str(e)}")
+            return ""
+    
+    @staticmethod
+    def extract_image_text(image_file) -> str:
+        """
+        Extract text from image using OCR
+        
+        Args:
+            image_file: Uploaded image file object
+            
+        Returns:
+            Extracted text content
+        """
+        try:
+            image = Image.open(image_file)
+            text = pytesseract.image_to_string(image, lang="ara+eng")
+            return text.strip()
+        except Exception as e:
+            st.error(f"Image Processing Error: {str(e)}")
+            return ""
+    
+    @staticmethod
+    def process_file(uploaded_file) -> str:
+        """
+        Universal file processor supporting PDF, TXT, and images
+        
+        Args:
+            uploaded_file: Streamlit uploaded file object
+            
+        Returns:
+            Extracted text content
+        """
+        if uploaded_file is None:
+            return ""
+        
+        file_type = uploaded_file.type
+        
+        if file_type == "application/pdf":
+            return DocumentProcessor.extract_pdf_text(uploaded_file)
+        
+        elif file_type in ["image/jpeg", "image/jpg", "image/png"]:
+            return DocumentProcessor.extract_image_text(uploaded_file)
+        
+        elif file_type == "text/plain":
+            return uploaded_file.read().decode("utf-8")
+        
         else:
             try:
-                content = uploaded_file.read().decode("utf-8")
+                return uploaded_file.read().decode("utf-8")
             except Exception as e:
-                st.error(f"خطأ أثناء قراءة الملف: {e}")
-    return content
+                st.error(f"Unsupported file format: {str(e)}")
+                return ""
 
-def call_llm(prompt):
-   # augmented_prompt = augment_prompt_with_chroma(prompt)
-    response = model.generate_content(prompt)
-    return response.candidates[0].content.parts[0].text
+# ===================================================================
+# LANGUAGE & MEDIA UTILITIES
+# ===================================================================
 
-# -------------------------------------------------------------------
-# الميزة 1: دردشة مع الملف
-# -------------------------------------------------------------------
-def chat_with_pdf_feature(language):
-    st.subheader("📄 دردشة مع الملف")
-    uploaded_file = st.file_uploader("ارفع ملف (PDF, TXT, صورة)", type=["pdf", "txt", "jpg", "jpeg", "png"])
-    if uploaded_file is not None:
-        content = process_uploaded_file(uploaded_file)
-        if content.strip() == "":
-            st.error("لم يتم استخراج أي نص من الملف.")
-            return
-        detected_lang = detect_language(content)
-        language_str = "العربية" if detected_lang == "ar" else "الإنجليزية"
-        summary_prompt = f"الوثيقة التالية تحتوي على معلومات، لخص النص بشكل موجز باللغة {language_str}:\n\n{content}"
-        summary = call_llm(summary_prompt)
-        st.markdown("### الملخص")
-        st.write(summary)
-        question = st.text_input("اطرح سؤالك عن الملف")
-        if st.button("إرسال السؤال"):
-            if question:
-                prompt = f"الوثيقة:\n{content}\n\nالسؤال: {question}\nالرجاء تقديم إجابة باللغة {language_str}."
-                answer = call_llm(prompt)
-                st.markdown("### الإجابة")
-                st.write(answer)
-            else:
-                st.warning("الرجاء إدخال سؤال.")
-
-# -------------------------------------------------------------------
-# الميزة 2: مولّد الاختبارات
-# -------------------------------------------------------------------
-def quiz_generator_feature(language):
-    st.subheader("🧠 مولّد الاختبارات")
-    input_method = st.radio("اختر طريقة الإدخال", ("رفع ملف", "نسخ ولصق النص"))
-    content = ""
-    if input_method == "رفع ملف":
-        uploaded_file = st.file_uploader("ارفع ملف (PDF, TXT, صورة)", type=["pdf", "txt", "jpg", "jpeg", "png"], key="quiz_file")
-        if uploaded_file is not None:
-            content = process_uploaded_file(uploaded_file)
-    else:
-        content = st.text_area("أدخل النص", height=300)
+class LanguageUtils:
+    """Language detection and text-to-speech utilities"""
     
-    if content:
-        st.markdown("### معاينة المحتوى")
-        st.write(content[:500] + "..." if len(content) > 500 else content)
-        if st.button("توليد الاختبار"):
-            detected_lang = detect_language(content)
-            language_str = "العربية" if detected_lang == "ar" else "الإنجليزية"
-            prompt = (
-                f"أنشئ اختباراً متعدد الخيارات (MCQs) باللغة {language_str} قائم على المحتوى التالي. "
-                "يجب أن يحتوي كل سؤال على أربع إجابات مع تحديد الإجابة الصحيحة أسفل كل سؤال.\n\n" + content
-            )
-            quiz_text = call_llm(prompt)
-            st.markdown("### نتيجة الاختبار")
-            quiz_blocks = quiz_text.strip().split("\n\n")
-            for block in quiz_blocks:
-                lines = block.strip().split("\n")
-                if not lines:
-                    continue
-                st.markdown("---")
-                for line in lines:
-                    if line.startswith("السؤال") or line.startswith("س:") or "؟" in line:
-                        st.markdown(f"**🟠 {line.strip()}**")
-                    elif "الإجابة" in line:
-                        st.markdown(f"✅ **{line.strip()}**")
-                    elif re.match(r"^[أ-د]\)", line.strip()):
-                        st.markdown(f"- {line.strip()}")
-                    else:
-                        st.write(line.strip())
-
-# -------------------------------------------------------------------
-# الميزة 3: تلخيص فيديو YouTube
-# -------------------------------------------------------------------
-def youtube_summarizer_feature(language):
-    st.subheader("🎥 مولّد ملخص الفيديو من YouTube")
-    video_url = st.text_input("أدخل رابط فيديو YouTube")
-    if st.button("تلخيص الفيديو"):
-        if video_url:
-            transcript = extract_youtube_transcript(video_url)
-            detected_lang = detect_language(transcript)
-            language_str = "العربية" if detected_lang == "ar" else "الإنجليزية"
-            prompt = (
-                f"النص التالي هو تفريغ فيديو تعليمي. قم بتوليد ملخص شامل له باللغة {language_str}، دون عرض النص الأصلي:\n\n" + transcript
-            )
-            summary = call_llm(prompt)
-            st.markdown("### الملخص")
-            st.write(summary)
-        else:
-            st.warning("الرجاء إدخال رابط الفيديو.")
-
-# -------------------------------------------------------------------
-# الميزة 4: دردشة عامة (مدعومة بالمنهج)
-# -------------------------------------------------------------------
-def general_chat_feature(language):
-    st.subheader("💡 دردشة عامة (مدعومة بالمنهج)")
-    user_query = st.text_input("اكتب سؤالك هنا")
-    if st.button("إرسال"):
-        if user_query:
-            school_keywords = ["مدرسة", "ثانوي", "امتحان", "تعليم", "منهج", "صف"]
-           # if any(word in user_query for word in school_keywords):
-           #     prompt = augment_prompt_with_chroma(user_query)
-           # else:
-            prompt = user_query
-            answer = call_llm(prompt)
-            st.markdown("### الإجابة")
-            st.write(answer)
-        else:
-            st.warning("الرجاء كتابة سؤال.")
-
-# -------------------------------------------------------------------
-# الميزة 5: مولّد البطاقات التعليمية
-# -------------------------------------------------------------------
-def flashcard_generator_feature(language):
-    st.subheader("🗂️ مولّد البطاقات التعليمية")
-    input_method = st.radio("اختر طريقة الإدخال", ("رفع ملف", "نسخ ولصق النص"), key="flashcard_input")
-    content = ""
-    if input_method == "رفع ملف":
-        uploaded_file = st.file_uploader("ارفع ملف (PDF, TXT, صورة)", type=["pdf", "txt", "jpg", "jpeg", "png"], key="flashcard_file")
-        if uploaded_file is not None:
-            content = process_uploaded_file(uploaded_file)
-    else:
-        content = st.text_area("أدخل النص", height=300, key="flashcard_text")
+    @staticmethod
+    def detect_language(text: str) -> str:
+        """Detect language of input text"""
+        try:
+            lang = detect(text)
+            return "ar" if lang.startswith("ar") else "en"
+        except:
+            return Config.DEFAULT_LANGUAGE
     
-    if content:
-        detected_lang = detect_language(content)
-        language_str = "العربية" if detected_lang == "ar" else "الإنجليزية"
-        prompt = (
-            f"من النص التالي، أنشئ مجموعة من البطاقات التعليمية على هيئة سؤال-جواب. "
-            f"يجب أن يكون كل سؤال وإجابته باللغة {language_str} وبصيغة موجزة:\n\n{content}\n\n"
-            "يرجى إخراج البطاقات في الشكل التالي:\n"
-            "البطاقة 1:\n"
-            "السؤال: ...\n"
-            "الإجابة: ...\n\n"
-            "البطاقة 2: ..."
+    @staticmethod
+    def get_language_name(lang_code: str) -> str:
+        """Convert language code to full name"""
+        return "Arabic" if lang_code == "ar" else "English"
+
+class MediaProcessor:
+    """Media processing for audio and video content"""
+    
+    @staticmethod
+    def extract_youtube_transcript(video_url: str) -> str:
+        """
+        Extract transcript from YouTube video
+        
+        Args:
+            video_url: YouTube video URL
+            
+        Returns:
+            Video transcript text
+        """
+        try:
+            video_id_match = re.search(r"v=([^&]+)", video_url)
+            video_id = video_id_match.group(1) if video_id_match else video_url.split("/")[-1]
+            
+            transcript_list = YouTubeTranscriptApi.get_transcript(
+                video_id, 
+                languages=['en', 'ar']
+            )
+            transcript = " ".join([item["text"] for item in transcript_list])
+            return transcript
+        
+        except Exception as e:
+            return f"Unable to extract transcript from video. Error: {str(e)}"
+    
+    @staticmethod
+    def generate_audio(text: str) -> BytesIO:
+        """
+        Generate text-to-speech audio
+        
+        Args:
+            text: Input text to convert
+            
+        Returns:
+            Audio file as BytesIO object
+        """
+        try:
+            detected_lang = LanguageUtils.detect_language(text)
+            tts = gTTS(text, lang=detected_lang)
+            audio_bytes = BytesIO()
+            tts.write_to_fp(audio_bytes)
+            audio_bytes.seek(0)
+            return audio_bytes
+        except Exception as e:
+            st.error(f"Audio Generation Error: {str(e)}")
+            return None
+
+# ===================================================================
+# FEATURE IMPLEMENTATIONS
+# ===================================================================
+
+class DocumentChat:
+    """Interactive document Q&A system"""
+    
+    @staticmethod
+    def render():
+        st.header("Document Intelligence")
+        st.markdown("Upload any document and engage in an intelligent conversation about its content")
+        
+        uploaded_file = st.file_uploader(
+            "Upload Document",
+            type=Config.SUPPORTED_FILE_TYPES,
+            help="Supports PDF, TXT, and image files"
         )
-        flashcards = call_llm(prompt)
-        st.markdown("### البطاقات التعليمية")
-        cards = re.split(r"(?:^|\n)(?=البطاقة\s*\d+[:：])", flashcards)
-        for i, card in enumerate(cards):
-            card = card.strip()
-            if card:
-                with st.expander(f"📘 بطاقة {i + 1}"):
-                    lines = card.split("\n")
-                    for line in lines:
-                        line = line.strip()
-                        if line.startswith("السؤال"):
-                            st.markdown(f"**🟠 {line}**")
-                        elif line.startswith("الإجابة"):
-                            st.markdown(f"✅ {line}")
-                        else:
-                            st.write(line)
+        
+        if uploaded_file:
+            with st.spinner("Processing document..."):
+                content = DocumentProcessor.process_file(uploaded_file)
+            
+            if not content.strip():
+                st.error("No content could be extracted from the document")
+                return
+            
+            detected_lang = LanguageUtils.detect_language(content)
+            lang_name = LanguageUtils.get_language_name(detected_lang)
+            
+            st.success(f"Document processed successfully | Language: {lang_name}")
+            
+            # Generate AI-powered summary
+            with st.expander("Document Summary"):
+                summary_prompt = f"""Analyze the following document and provide a comprehensive summary.
+                Use clear, professional language in {lang_name}.
+                
+                Document Content:
+                {content}
+                
+                Provide:
+                1. Main topic and purpose
+                2. Key points (3-5 bullet points)
+                3. Important insights or conclusions"""
+                
+                with st.spinner("Generating intelligent summary..."):
+                    summary = AIProcessor.generate_response(summary_prompt)
+                    st.markdown(summary)
+            
+            # Q&A Interface
+            st.subheader("Ask Questions")
+            question = st.text_input("What would you like to know about this document?")
+            
+            col1, col2 = st.columns([1, 5])
+            with col1:
+                ask_button = st.button("Submit", type="primary")
+            
+            if ask_button and question:
+                qa_prompt = f"""Based on the following document, answer the question comprehensively and accurately.
+                
+                Document Content:
+                {content}
+                
+                Question: {question}
+                
+                Provide a detailed, well-structured answer in {lang_name}. Include relevant quotes or references from the document when appropriate."""
+                
+                with st.spinner("Analyzing and generating response..."):
+                    answer = AIProcessor.generate_response(qa_prompt)
+                    
+                    st.markdown("### Response")
+                    st.info(answer)
 
-# -------------------------------------------------------------------
-# الميزة 6: المساعد الصوتي (TTS مع تحسين النص عبر Gemini)
-# -------------------------------------------------------------------
-def arabic_voice_assistant_feature(language):
-    st.subheader("🗣️ المساعد الصوتي")
-    input_method = st.radio("اختر طريقة الإدخال", ("رفع ملف نصي", "كتابة النص يدويًا"))
-    content = ""
-    if input_method == "رفع ملف نصي":
-        uploaded_file = st.file_uploader("ارفع ملف (PDF, TXT, صورة)", type=["pdf", "txt", "jpg", "jpeg", "png"])
-        if uploaded_file is not None:
-            content = process_uploaded_file(uploaded_file)
-    else:
-        content = st.text_area("اكتب النص هنا", height=300)
-    if content.strip():
-        detected_lang = detect_language(content)
-        lang_name = "العربية" if detected_lang == "ar" else "الإنجليزية"
-        st.success(f"✅ تم التعرف على اللغة: {lang_name}")
-        # استخدام Gemini لإعادة صياغة وتحسين النص قبل تحويله إلى صوت
-        if detected_lang == "ar":
-            enhancement_prompt = f"قم بإعادة صياغة وتحسين النص التالي ليكون أكثر وضوحاً وفهماً:\n\n{content}"
+class QuizGenerator:
+    """AI-powered quiz generation system"""
+    
+    @staticmethod
+    def render():
+        st.header("Intelligent Quiz Generator")
+        st.markdown("Transform any content into comprehensive assessment questions")
+        
+        input_method = st.radio(
+            "Content Source",
+            ["Upload File", "Paste Text"],
+            horizontal=True
+        )
+        
+        content = ""
+        
+        if input_method == "Upload File":
+            uploaded_file = st.file_uploader(
+                "Select Document",
+                type=Config.SUPPORTED_FILE_TYPES,
+                key="quiz_file"
+            )
+            if uploaded_file:
+                with st.spinner("Extracting content..."):
+                    content = DocumentProcessor.process_file(uploaded_file)
         else:
-            enhancement_prompt = f"Please rephrase and improve the following text to make it clearer and more understandable:\n\n{content}"
-        enhanced_text = call_llm(enhancement_prompt)
-        st.markdown("### النص المحسن")
-        st.write(enhanced_text)
-        audio = get_tts_audio(enhanced_text)
-        st.audio(audio, format="audio/mp3")
-    else:
-        st.info("يرجى إدخال نص أو رفع ملف.")
+            content = st.text_area(
+                "Enter Text Content",
+                height=300,
+                placeholder="Paste your educational content here..."
+            )
+        
+        if content:
+            preview = content[:Config.MAX_PREVIEW_LENGTH]
+            preview += "..." if len(content) > Config.MAX_PREVIEW_LENGTH else ""
+            
+            with st.expander("Content Preview"):
+                st.text(preview)
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                num_questions = st.number_input("Number of Questions", 1, 20, 5)
+            with col2:
+                difficulty = st.selectbox("Difficulty Level", ["Easy", "Medium", "Hard"])
+            with col3:
+                question_type = st.selectbox("Question Type", ["Multiple Choice", "True/False", "Mixed"])
+            
+            if st.button("Generate Quiz", type="primary"):
+                detected_lang = LanguageUtils.detect_language(content)
+                lang_name = LanguageUtils.get_language_name(detected_lang)
+                
+                quiz_prompt = f"""Create a {difficulty.lower()} difficulty quiz with {num_questions} {question_type.lower()} questions based on the following content.
+                
+                Content:
+                {content}
+                
+                Requirements:
+                1. Each question should test understanding of key concepts
+                2. For multiple choice: provide 4 options (A, B, C, D)
+                3. Clearly mark the correct answer
+                4. Include brief explanations for correct answers
+                5. Use {lang_name} language
+                6. Format professionally with clear numbering
+                
+                Output format:
+                Question 1: [Question text]
+                A) [Option]
+                B) [Option]
+                C) [Option]
+                D) [Option]
+                Correct Answer: [Letter]
+                Explanation: [Brief explanation]
+                """
+                
+                with st.spinner("Generating intelligent assessment..."):
+                    quiz_text = AIProcessor.generate_response(quiz_prompt, temperature=0.8)
+                    
+                    st.markdown("### Generated Quiz")
+                    st.markdown(quiz_text)
+                    
+                    # Download option
+                    st.download_button(
+                        "Download Quiz",
+                        quiz_text,
+                        file_name=f"quiz_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                        mime="text/plain"
+                    )
 
-# -------------------------------------------------------------------
-# الميزة 7: السؤال من صورة
-# -------------------------------------------------------------------
-def question_from_image_feature(language):
-    st.subheader("🖼️ اسأل عن محتوى صورة")
-    image_file = st.file_uploader("ارفع صورة (jpg, jpeg, png)", type=["jpg", "jpeg", "png"])
-    if image_file is not None:
-        image = Image.open(image_file)
-        st.image(image, caption="الصورة المرفوعة", use_column_width=True)
-        extracted_text = pytesseract.image_to_string(image, lang="ara+eng")
-        if extracted_text.strip():
-            st.markdown("### النص المستخرج (تحضير للإجابة فقط)")
-            st.write(extracted_text)
-            user_question = st.text_input("❓ اسأل أي سؤال عن محتوى الصورة")
-            if st.button("إرسال السؤال"):
-                detected_lang = detect_language(extracted_text)
-                language_str = "العربية" if detected_lang == "ar" else "الإنجليزية"
-                prompt = (
-                    f"الصورة تحتوي على النص التالي:\n\n{extracted_text}\n\n"
-                    f"السؤال: {user_question}\nالرجاء الإجابة باللغة {language_str}."
-                )
-                answer = call_llm(prompt)
-                st.markdown("### الإجابة")
-                st.write(answer)
+class YouTubeSummarizer:
+    """AI-powered video content summarizer"""
+    
+    @staticmethod
+    def render():
+        st.header("Video Intelligence Analyzer")
+        st.markdown("Extract and analyze educational content from YouTube videos")
+        
+        video_url = st.text_input(
+            "YouTube Video URL",
+            placeholder="https://www.youtube.com/watch?v=..."
+        )
+        
+        col1, col2 = st.columns([1, 5])
+        with col1:
+            analyze_button = st.button("Analyze", type="primary")
+        
+        if analyze_button and video_url:
+            with st.spinner("Extracting video transcript..."):
+                transcript = MediaProcessor.extract_youtube_transcript(video_url)
+            
+            if "Error" in transcript or "Unable" in transcript:
+                st.error(transcript)
+                return
+            
+            detected_lang = LanguageUtils.detect_language(transcript)
+            lang_name = LanguageUtils.get_language_name(detected_lang)
+            
+            summary_prompt = f"""Analyze this educational video transcript and provide a comprehensive breakdown.
+            
+            Transcript:
+            {transcript}
+            
+            Provide in {lang_name}:
+            1. Executive Summary (2-3 sentences)
+            2. Main Topics Covered (bullet points)
+            3. Key Insights and Learning Points
+            4. Practical Applications or Examples
+            5. Conclusion and Takeaways
+            
+            Use professional, clear language suitable for educational purposes."""
+            
+            with st.spinner("Generating intelligent analysis..."):
+                summary = AIProcessor.generate_response(summary_prompt)
+                
+                st.markdown("### Video Analysis")
+                st.success(summary)
+                
+                # Additional features
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("Generate Key Concepts"):
+                        concept_prompt = f"Extract and explain the top 5 key concepts from this content in {lang_name}:\n\n{transcript}"
+                        concepts = AIProcessor.generate_response(concept_prompt)
+                        st.info(concepts)
+                
+                with col2:
+                    if st.button("Create Study Notes"):
+                        notes_prompt = f"Create structured study notes from this content in {lang_name}:\n\n{transcript}"
+                        notes = AIProcessor.generate_response(notes_prompt)
+                        st.info(notes)
+
+class ConversationalAI:
+    """Advanced conversational AI assistant"""
+    
+    @staticmethod
+    def render():
+        st.header("AI Learning Assistant")
+        st.markdown("Your intelligent companion for academic questions and discussions")
+        
+        # Initialize chat history
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
+        
+        # Display chat history
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+        
+        # User input
+        user_query = st.chat_input("Ask me anything about your studies...")
+        
+        if user_query:
+            # Add user message
+            st.session_state.messages.append({"role": "user", "content": user_query})
+            with st.chat_message("user"):
+                st.markdown(user_query)
+            
+            # Generate AI response
+            with st.chat_message("assistant"):
+                message_placeholder = st.empty()
+                full_response = ""
+                
+                context_prompt = f"""You are an expert educational AI assistant helping students with their academic queries.
+                
+                Student Question: {user_query}
+                
+                Provide a comprehensive, well-structured response that:
+                1. Directly answers the question
+                2. Provides relevant examples or explanations
+                3. Suggests related topics for deeper learning
+                4. Uses clear, educational language
+                
+                Be helpful, accurate, and encouraging."""
+                
+                # Simulate streaming
+                response = AIProcessor.generate_response(context_prompt)
+                
+                # Display with typing effect
+                for char in response:
+                    full_response += char
+                    message_placeholder.markdown(full_response + "▌")
+                    time.sleep(0.01)
+                
+                message_placeholder.markdown(full_response)
+            
+            st.session_state.messages.append({"role": "assistant", "content": full_response})
+
+class FlashcardGenerator:
+    """Intelligent flashcard creation system"""
+    
+    @staticmethod
+    def render():
+        st.header("Smart Flashcard Creator")
+        st.markdown("Generate effective study flashcards from any content")
+        
+        input_method = st.radio(
+            "Content Source",
+            ["Upload File", "Paste Text"],
+            horizontal=True,
+            key="flashcard_input"
+        )
+        
+        content = ""
+        
+        if input_method == "Upload File":
+            uploaded_file = st.file_uploader(
+                "Select Document",
+                type=Config.SUPPORTED_FILE_TYPES,
+                key="flashcard_file"
+            )
+            if uploaded_file:
+                content = DocumentProcessor.process_file(uploaded_file)
         else:
-            st.warning("⚠️ لم يتم استخراج نص من الصورة.")
+            content = st.text_area(
+                "Enter Content",
+                height=300,
+                placeholder="Paste content to convert into flashcards...",
+                key="flashcard_text"
+            )
+        
+        if content:
+            num_cards = st.slider("Number of Flashcards", 5, 30, 10)
+            
+            if st.button("Generate Flashcards", type="primary"):
+                detected_lang = LanguageUtils.detect_language(content)
+                lang_name = LanguageUtils.get_language_name(detected_lang)
+                
+                flashcard_prompt = f"""Create {num_cards} high-quality flashcards from the following content.
+                
+                Content:
+                {content}
+                
+                Requirements:
+                1. Each flashcard should have a clear, concise question
+                2. Provide accurate, comprehensive answers
+                3. Cover the most important concepts
+                4. Use {lang_name} language
+                5. Format as: "Card X: Question: ... | Answer: ..."
+                
+                Focus on key concepts, definitions, and important relationships."""
+                
+                with st.spinner("Creating intelligent flashcards..."):
+                    flashcards = AIProcessor.generate_response(flashcard_prompt)
+                    
+                    # Parse and display flashcards
+                    cards = re.split(r'Card\s+\d+:', flashcards)
+                    
+                    for idx, card in enumerate(cards[1:], 1):
+                        with st.expander(f"Flashcard {idx}"):
+                            parts = card.split('|')
+                            if len(parts) >= 2:
+                                question = parts[0].replace("Question:", "").strip()
+                                answer = parts[1].replace("Answer:", "").strip()
+                                
+                                st.markdown(f"**Question:** {question}")
+                                st.markdown(f"**Answer:** {answer}")
+                            else:
+                                st.markdown(card.strip())
 
-# -------------------------------------------------------------------
-# تخطيط التطبيق الرئيسي والتوجيه عبر الشريط الجانبي
-# -------------------------------------------------------------------
+class VoiceAssistant:
+    """Text-to-speech AI assistant"""
+    
+    @staticmethod
+    def render():
+        st.header("Voice Learning Assistant")
+        st.markdown("Convert text content to natural speech for audio learning")
+        
+        input_method = st.radio(
+            "Content Source",
+            ["Upload File", "Enter Text"],
+            horizontal=True
+        )
+        
+        content = ""
+        
+        if input_method == "Upload File":
+            uploaded_file = st.file_uploader(
+                "Select Document",
+                type=Config.SUPPORTED_FILE_TYPES
+            )
+            if uploaded_file:
+                content = DocumentProcessor.process_file(uploaded_file)
+        else:
+            content = st.text_area(
+                "Enter Text",
+                height=300,
+                placeholder="Enter text to convert to speech..."
+            )
+        
+        if content.strip():
+            detected_lang = LanguageUtils.detect_language(content)
+            lang_name = LanguageUtils.get_language_name(detected_lang)
+            
+            st.info(f"Detected Language: {lang_name}")
+            
+            # AI Enhancement
+            enhance = st.checkbox("Enhance text with AI for better clarity")
+            
+            if enhance:
+                enhancement_prompt = f"""Improve and clarify this text for audio narration. Make it more conversational and easier to understand when spoken aloud.
+                
+                Original Text:
+                {content}
+                
+                Provide the enhanced version in {lang_name}."""
+                
+                with st.spinner("Enhancing text with AI..."):
+                    enhanced_text = AIProcessor.generate_response(enhancement_prompt)
+                    
+                    st.markdown("### Enhanced Text")
+                    st.write(enhanced_text)
+                    content = enhanced_text
+            
+            if st.button("Generate Audio", type="primary"):
+                with st.spinner("Converting text to speech..."):
+                    audio = MediaProcessor.generate_audio(content)
+                    
+                    if audio:
+                        st.success("Audio generated successfully")
+                        st.audio(audio, format="audio/mp3")
+                        
+                        st.download_button(
+                            "Download Audio",
+                            audio,
+                            file_name=f"audio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3",
+                            mime="audio/mp3"
+                        )
+
+class ImageAnalyzer:
+    """AI-powered image content analysis"""
+    
+    @staticmethod
+    def render():
+        st.header("Visual Content Analyzer")
+        st.markdown("Extract and analyze text from images using advanced OCR and AI")
+        
+        image_file = st.file_uploader(
+            "Upload Image",
+            type=["jpg", "jpeg", "png"],
+            help="Upload an image containing text or diagrams"
+        )
+        
+        if image_file:
+            image = Image.open(image_file)
+            st.image(image, caption="Uploaded Image", use_column_width=True)
+            
+            with st.spinner("Analyzing image content..."):
+                extracted_text = DocumentProcessor.extract_image_text(image_file)
+            
+            if extracted_text.strip():
+                st.success("Text extracted successfully")
+                
+                with st.expander("Extracted Text"):
+                    st.text(extracted_text)
+                
+                detected_lang = LanguageUtils.detect_language(extracted_text)
+                lang_name = LanguageUtils.get_language_name(detected_lang)
+                
+                user_question = st.text_input("Ask a question about the image content")
+                
+                if st.button("Analyze", type="primary") and user_question:
+                    analysis_prompt = f"""Analyze the following text extracted from an image and answer the question.
+                    
+                    Extracted Content:
+                    {extracted_text}
+                    
+                    Question: {user_question}
+                    
+                    Provide a comprehensive answer in {lang_name}, including:
+                    1. Direct answer to the question
+                    2. Relevant context from the image
+                    3. Additional insights if applicable"""
+                    
+                    with st.spinner("Generating intelligent response..."):
+                        answer = AIProcessor.generate_response(analysis_prompt)
+                        
+                        st.markdown("### Analysis Result")
+                        st.success(answer)
+            else:
+                st.warning("No text could be extracted from this image")
+
+# ===================================================================
+# APPLICATION MAIN INTERFACE
+# ===================================================================
+
+def apply_custom_styling():
+    """Apply custom CSS for professional appearance"""
+    st.markdown("""
+        <style>
+        .main {
+            padding: 2rem;
+        }
+        .stButton>button {
+            width: 100%;
+            border-radius: 5px;
+            height: 3em;
+            font-weight: 500;
+        }
+        .stTextInput>div>div>input {
+            border-radius: 5px;
+        }
+        .stTextArea>div>div>textarea {
+            border-radius: 5px;
+        }
+        h1 {
+            color: #1E3A8A;
+            font-weight: 700;
+            padding-bottom: 1rem;
+            border-bottom: 3px solid #3B82F6;
+        }
+        h2 {
+            color: #1E40AF;
+            font-weight: 600;
+        }
+        .stAlert {
+            border-radius: 5px;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
 def main():
-    st.title("المساعد التعليمي لطلبة الثانوية العامة المصرية (الثانوية العامة)")
-    
-    # تحسين تصميم الشريط الجانبي باستخدام أزرار الراديو وإضافة إيموجي لكل خاصية
-    features = {
-        "📄 دردشة مع الملف": chat_with_pdf_feature,
-        "🧠 مولّد الاختبارات": quiz_generator_feature,
-        "🎥 تلخيص فيديو YouTube": youtube_summarizer_feature,
-        "💡 دردشة عامة (مدعومة بالمنهج)": general_chat_feature,
-        "🗂️ مولّد البطاقات التعليمية": flashcard_generator_feature,
-        "🗣️ المساعد الصوتي": arabic_voice_assistant_feature,
-        "🖼️ سؤال من صورة": question_from_image_feature
-    }
-    feature_choice = st.sidebar.radio("اختر الخاصية", list(features.keys()))
-    # اختيار لغة الواجهة (للنصوص غير المستخرجة من الملفات)
-    language = st.sidebar.radio("اختر لغة الواجهة", ("Arabic", "English"))
-    
-    st.sidebar.markdown("---")
-    st.sidebar.info(
-        "هذا التطبيق مصمم لمساعدة طلاب الثانوية العامة بالمحتوى التعليمي. "
-        "يستخدم واجهة Gemini 1.5 Pro مع دعم ChromaDB للبيانات المنهجية."
+    st.set_page_config(
+        page_title="AI Educational Assistant",
+        page_icon="🎓",
+        layout="wide",
+        initial_sidebar_state="expanded"
     )
     
-    selected_function = features[feature_choice]
-    selected_function(language)
+    apply_custom_styling()
+    
+    # Header
+    st.title("Advanced AI Educational Assistant")
+    st.markdown("Powered by Google Gemini 1.5 Pro | Professional Learning Support System")
+    
+    # Sidebar navigation
+    st.sidebar.title("Navigation")
+    st.sidebar.markdown("Select a feature below to get started")
+    
+    features = {
+        "Document Intelligence": DocumentChat,
+        "Quiz Generator": QuizGenerator,
+        "Video Analyzer": YouTubeSummarizer,
+        "AI Assistant": ConversationalAI,
+        "Flashcard Creator": FlashcardGenerator,
+        "Voice Assistant": VoiceAssistant,
+        "Image Analyzer": ImageAnalyzer
+    }
+    
+    selected_feature = st.sidebar.radio(
+        "Features",
+        list(features.keys()),
+        label_visibility="collapsed"
+    )
+    
+    st.sidebar.markdown("---")
+    
+    # Information panel
+    with st.sidebar.expander("About This Application"):
+        st.markdown("""
+        This professional AI assistant leverages advanced machine learning 
+        to provide comprehensive educational support.
+        
+        **Capabilities:**
+        - Intelligent document analysis
+        - Automated quiz generation
+        - Video content summarization
+        - Interactive Q&A
+        - Flashcard creation
+        - Text-to-speech conversion
+        - Image text extraction
+        
+        **Technology Stack:**
+        - Google Gemini 1.5 Pro
+        - Advanced OCR Processing
+        - Natural Language Understanding
+        - Multi-language Support
+        """)
+    
+    # Render selected feature
+    st.markdown("---")
+    selected_class = features[selected_feature]
+    selected_class.render()
+    
+    # Footer
+    st.sidebar.markdown("---")
+    st.sidebar.caption(f"Version 2.0 | Last Updated: {datetime.now().strftime('%Y-%m-%d')}")
+    st.sidebar.caption("Developed with Google Gemini AI")
 
 if __name__ == "__main__":
     main()
