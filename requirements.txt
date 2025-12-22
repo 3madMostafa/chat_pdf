@@ -8,3 +8,4 @@ langdetect
 gTTS
 youtube-transcript-api
 requests
+python-dotenv
