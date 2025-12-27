@@ -245,7 +245,7 @@ class MediaProcessor:
             if not video_id:
                 return "Error: Could not extract video ID from the URL."
             
-            # Method A: Try fetch style method first
+            # Use fetch method (works with the current version)
             try:
                 ytt_api = YouTubeTranscriptApi()
                 fetched_transcript = ytt_api.fetch(video_id)
@@ -260,35 +260,17 @@ class MediaProcessor:
                 
                 if text_parts:
                     return ' '.join(text_parts)
+                else:
+                    return "Error: Transcript fetched but no text content found."
                 
-            except (AttributeError, TypeError):
-                # Fetch method not available or returned unexpected format, continue to fallback
-                pass
-            except Exception:
-                # Fetch method failed, continue to fallback
-                pass
-            
-            # Method B: Fallback to official get_transcript method
-            try:
-                transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'ar'])
-                return ' '.join([entry['text'] for entry in transcript_list])
             except TranscriptsDisabled:
-                # Try generated transcript as final fallback
-                try:
-                    transcript = YouTubeTranscriptApi.list_transcripts(video_id).find_generated_transcript(['en']).fetch(preserve_formatting=False)
-                    return ' '.join([entry['text'] for entry in transcript])
-                except TranscriptsDisabled:
-                    return "Error: Transcripts are disabled for this video. The video owner has not enabled captions."
-                except NoTranscriptFound:
-                    return "Error: No English transcript found for this video. The video may not have captions available."
-                except VideoUnavailable:
-                    return "Error: Video is unavailable or does not exist."
-                except Exception as e:
-                    return f"Error: Could not retrieve transcript. Details: {str(e)}"
+                return "Error: Transcripts are disabled for this video. The video owner has not enabled captions."
             except NoTranscriptFound:
-                return "Error: No transcript found for this video in the requested languages (English or Arabic)."
+                return "Error: No transcript found for this video. The video may not have captions available."
             except VideoUnavailable:
                 return "Error: Video is unavailable or does not exist. Please check the URL."
+            except AttributeError as e:
+                return f"Error: YouTube Transcript API method not available. Please update youtube-transcript-api package. Details: {str(e)}"
             except Exception as e:
                 return f"Error: Could not retrieve transcript from YouTube. Details: {str(e)}"
                 
