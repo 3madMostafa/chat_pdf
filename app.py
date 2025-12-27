@@ -5,6 +5,20 @@ import requests
 import google.generativeai as genai
 import PyPDF2
 from youtube_transcript_api import YouTubeTranscriptApi
+try:
+    from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound, VideoUnavailable
+except ImportError:
+    # Fallback for older versions
+    try:
+        from youtube_transcript_api.exceptions import TranscriptsDisabled, NoTranscriptFound, VideoUnavailable
+    except ImportError:
+        # If neither import works, define dummy classes
+        class TranscriptsDisabled(Exception):
+            pass
+        class NoTranscriptFound(Exception):
+            pass
+        class VideoUnavailable(Exception):
+            pass
 import pytesseract
 from PIL import Image
 from gtts import gTTS
@@ -204,7 +218,7 @@ class MediaProcessor:
     @staticmethod
     def extract_youtube_transcript(video_url: str) -> str:
         """
-        Extract transcript from YouTube video
+        Extract transcript from YouTube video with robust fallback methods
         
         Args:
             video_url: YouTube video URL
@@ -213,18 +227,73 @@ class MediaProcessor:
             Video transcript text
         """
         try:
-            video_id_match = re.search(r"v=([^&]+)", video_url)
-            video_id = video_id_match.group(1) if video_id_match else video_url.split("/")[-1]
+            # Extract video_id from various YouTube URL formats
+            video_id = None
             
-            transcript_list = YouTubeTranscriptApi.get_transcript(
-                video_id, 
-                languages=['en', 'ar']
-            )
-            transcript = " ".join([item["text"] for item in transcript_list])
-            return transcript
-        
+            if 'youtu.be/' in video_url:
+                video_id = video_url.split('youtu.be/')[-1].split('?')[0].split('&')[0]
+            elif 'youtube.com/watch?v=' in video_url:
+                video_id = video_url.split('watch?v=')[-1].split('&')[0]
+            elif 'youtube.com/shorts/' in video_url:
+                video_id = video_url.split('shorts/')[-1].split('?')[0].split('&')[0]
+            elif 'youtube.com/embed/' in video_url:
+                video_id = video_url.split('embed/')[-1].split('?')[0].split('&')[0]
+            else:
+                # Assume it's already a video_id
+                video_id = video_url.strip()
+            
+            if not video_id:
+                return "Error: Could not extract video ID from the URL."
+            
+            # Method A: Try fetch style method first
+            try:
+                ytt_api = YouTubeTranscriptApi()
+                fetched_transcript = ytt_api.fetch(video_id)
+                
+                # Convert to text safely - handle both object attributes and dict items
+                text_parts = []
+                for snippet in fetched_transcript:
+                    if hasattr(snippet, 'text'):
+                        text_parts.append(snippet.text)
+                    elif isinstance(snippet, dict) and 'text' in snippet:
+                        text_parts.append(snippet['text'])
+                
+                if text_parts:
+                    return ' '.join(text_parts)
+                
+            except (AttributeError, TypeError):
+                # Fetch method not available or returned unexpected format, continue to fallback
+                pass
+            except Exception:
+                # Fetch method failed, continue to fallback
+                pass
+            
+            # Method B: Fallback to official get_transcript method
+            try:
+                transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'ar'])
+                return ' '.join([entry['text'] for entry in transcript_list])
+            except TranscriptsDisabled:
+                # Try generated transcript as final fallback
+                try:
+                    transcript = YouTubeTranscriptApi.list_transcripts(video_id).find_generated_transcript(['en']).fetch(preserve_formatting=False)
+                    return ' '.join([entry['text'] for entry in transcript])
+                except TranscriptsDisabled:
+                    return "Error: Transcripts are disabled for this video. The video owner has not enabled captions."
+                except NoTranscriptFound:
+                    return "Error: No English transcript found for this video. The video may not have captions available."
+                except VideoUnavailable:
+                    return "Error: Video is unavailable or does not exist."
+                except Exception as e:
+                    return f"Error: Could not retrieve transcript. Details: {str(e)}"
+            except NoTranscriptFound:
+                return "Error: No transcript found for this video in the requested languages (English or Arabic)."
+            except VideoUnavailable:
+                return "Error: Video is unavailable or does not exist. Please check the URL."
+            except Exception as e:
+                return f"Error: Could not retrieve transcript from YouTube. Details: {str(e)}"
+                
         except Exception as e:
-            return f"Unable to extract transcript from video. Error: {str(e)}"
+            return f"Error extracting YouTube transcript: {str(e)}"
     
     @staticmethod
     def generate_audio(text: str) -> BytesIO:
@@ -829,6 +898,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
