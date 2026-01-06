@@ -37,7 +37,7 @@ DetectorFactory.seed = 0
 
 class Config:
     """Application configuration and constants"""
-    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") or "AIzaSyDOwMCTh0tc1Qy5bkTFaaEb262Mv6A5XRU"
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") or "AIzaSyB1KGvbxVh-86VuHKASbYf1JCLheGIxbmo"
     MODEL_NAME = "models/gemini-flash-latest"
     SUPPORTED_FILE_TYPES = ["pdf", "txt", "jpg", "jpeg", "png"]
     MAX_PREVIEW_LENGTH = 500
@@ -880,3 +880,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
