@@ -1,4 +1,6 @@
 import streamlit as st
+from dotenv import load_dotenv
+load_dotenv()
 import os
 import re
 import requests
@@ -37,7 +39,7 @@ DetectorFactory.seed = 0
 
 class Config:
     """Application configuration and constants"""
-    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") or "REMOVED_API_KEY"
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
     MODEL_NAME = "models/gemini-flash-latest"
     SUPPORTED_FILE_TYPES = ["pdf", "txt", "jpg", "jpeg", "png"]
     MAX_PREVIEW_LENGTH = 500
